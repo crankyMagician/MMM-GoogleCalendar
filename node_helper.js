@@ -44,6 +44,13 @@ module.exports = NodeHelper.create({
   // Override socketNotificationReceived method.
   socketNotificationReceived: function (notification, payload) {
     if (notification === "MODULE_READY") {
+      if (payload && payload.tokenFile) {
+        // This instance brings its own account. Its service is built when its
+        // first calendar is added, so there is nothing to sign in to here.
+        this.sendSocketNotification("SERVICE_READY", {});
+        return;
+      }
+      payload = payload || {};
       if (!this.calendarService) {
         if (payload.queryParams) {
           const params = new URLSearchParams(payload.queryParams);
@@ -72,6 +79,8 @@ module.exports = NodeHelper.create({
       maximumEntries: payload.maximumEntries,
       pastDaysCount: payload.pastDaysCount,
       maximumNumberOfDays: payload.maximumNumberOfDays,
+      tokenFile: payload.tokenFile,
+      credentialsFile: payload.credentialsFile,
       identifier: payload.id
     };
     const existing = this.fetchers.get(key);
@@ -333,6 +342,56 @@ module.exports = NodeHelper.create({
     return request?.response?.data?.error?.toUpperCase();
   },
 
+  /**
+   * Returns the calendar service for one account's token file, building it on
+   * first use. Each token file gets its own OAuth client, so several module
+   * instances can show different Google accounts side by side.
+   *
+   * @param {string} tokenFile Absolute path to the account's token JSON
+   * @param {string} [credentialsFile] Path to the OAuth client file
+   * @returns {object | null} The service, or null while the token file is missing or unreadable
+   */
+  accountService: function (tokenFile, credentialsFile) {
+    this.accountServices = this.accountServices || new Map();
+    const cached = this.accountServices.get(tokenFile);
+    if (cached) return cached;
+
+    try {
+      const credentials = JSON.parse(
+        fs.readFileSync(
+          credentialsFile || path.join(this.path, CREDENTIALS_FILE_NAME),
+          "utf8"
+        )
+      );
+      const { client_id, client_secret } = credentials.installed || {};
+      if (!client_id || !client_secret) {
+        throw new Error("the OAuth client file has no 'installed' client");
+      }
+      const client = new google.auth.OAuth2(client_id, client_secret);
+      useNativeFetch(client);
+      client.setCredentials(JSON.parse(fs.readFileSync(tokenFile, "utf8")));
+      client.on("tokens", (newTokens) => {
+        try {
+          const merged = {
+            ...JSON.parse(fs.readFileSync(tokenFile, "utf8")),
+            ...newTokens
+          };
+          fs.writeFileSync(tokenFile, JSON.stringify(merged), { mode: 0o600 });
+        } catch (e) {
+          Log.error(`${this.name}: Error persisting refreshed token`, e);
+        }
+      });
+      const service = google.calendar({ version: "v3", auth: client });
+      this.accountServices.set(tokenFile, service);
+      return service;
+    } catch (error) {
+      Log.warn(
+        `${this.name}: No usable sign-in at ${tokenFile}: ${error.message}`
+      );
+      return null;
+    }
+  },
+
   startCalendarService: function (auth, _this) {
     _this.calendarService = google.calendar({ version: "v3", auth });
     _this.sendSocketNotification("SERVICE_READY", {});
@@ -347,7 +406,22 @@ module.exports = NodeHelper.create({
     const fetcher = this.fetchers.get(key);
     if (!fetcher) return;
 
-    if (!this.calendarService) {
+    const { tokenFile, credentialsFile } = fetcher.params;
+    const service = tokenFile
+      ? this.accountService(tokenFile, credentialsFile)
+      : this.calendarService;
+
+    if (!service) {
+      if (tokenFile) {
+        // Keep polling, so the calendar appears by itself once that account
+        // has signed in and its token file exists.
+        this.sendSocketNotification("CALENDAR_ERROR", {
+          id: fetcher.params.identifier,
+          error_type: "AUTH_ERROR_GENERIC"
+        });
+        this.scheduleNextCalendarFetch(key);
+        return;
+      }
       // The loop ends here; the next ADD_CALENDAR after re-auth restarts it.
       fetcher.active = false;
       return;
@@ -361,7 +435,7 @@ module.exports = NodeHelper.create({
       identifier
     } = fetcher.params;
 
-    this.calendarService.events.list(
+    service.events.list(
       {
         calendarId: calendarID,
         timeMin: new Date(
@@ -392,6 +466,18 @@ module.exports = NodeHelper.create({
             err?.response?.status === 401 ||
             err?.message?.toLowerCase().includes("invalid_grant")
           ) {
+            if (tokenFile) {
+              // Leave the file for the owner to replace by signing in again,
+              // drop the cached client, and keep polling.
+              Log.warn(`${this.name}: The sign-in at ${tokenFile} is invalid or revoked`);
+              this.accountServices.delete(tokenFile);
+              this.sendSocketNotification("CALENDAR_ERROR", {
+                id: identifier,
+                error_type: "AUTH_ERROR_GENERIC"
+              });
+              this.scheduleNextCalendarFetch(key);
+              return;
+            }
             Log.warn(`${this.name}: Token invalid or revoked, clearing token and requesting re-auth`);
             fetcher.active = false;
             this.calendarService = null;

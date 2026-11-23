@@ -58,6 +58,12 @@ Module.register("MMM-GoogleCalendar", {
       "street ": ""
     },
     broadcastEvents: false,
+    // Give each instance its own Google account by pointing it at that account's
+    // token file (absolute path). Left empty, the module uses the single
+    // token.json in its own folder, as before.
+    tokenFile: null,
+    // Path to the OAuth client file when it is not credentials.json in the module folder.
+    credentialsFile: null,
     excludedEvents: [],
     sliceMultiDayEvents: false,
     nextDaysRelative: false,
@@ -118,12 +124,24 @@ Module.register("MMM-GoogleCalendar", {
       });
     } else {
       // check user token is authenticated.
-      this.sendSocketNotification("MODULE_READY");
+      this.sendSocketNotification("MODULE_READY", {
+        id: this.identifier,
+        tokenFile: this.config.tokenFile
+      });
     }
   },
 
   // Override socket notification handler.
   socketNotificationReceived: function (notification, payload) {
+    // An instance with its own tokenFile takes no part in the shared sign-in
+    // flow, so the shared flow's messages are not for it.
+    if (
+      this.config.tokenFile &&
+      (notification === "AUTH_FAILED" || notification === "AUTH_NEEDED")
+    ) {
+      return;
+    }
+
     // Authentication done before any calendar is fetched
     if (notification === "AUTH_FAILED") {
       const errorMessage = this.translate(payload.error_type);
@@ -889,6 +907,8 @@ Module.register("MMM-GoogleCalendar", {
       pastDaysCount:
         calendarConfig.pastDaysCount || this.config.pastDaysCount,
       fetchInterval: this.config.fetchInterval,
+      tokenFile: this.config.tokenFile,
+      credentialsFile: this.config.credentialsFile,
       symbolClass: calendarConfig.symbolClass,
       titleClass: calendarConfig.titleClass,
       timeClass: calendarConfig.timeClass,

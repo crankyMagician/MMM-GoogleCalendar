@@ -410,3 +410,22 @@ First, don't worry! We have a troubleshooting guide that addresses common issues
 | When attempting to log in after opening the authorization URL, I encounter a 403 Error ("Access Denied", "Error 403: access_denied", or similar). | This usually means the OAuth Consent Screen is not configured correctly or your account is not authorized. Ensure: 1. Your app is **not** set to "Internal" users unless you are part of the Google Workspace organization. 2. If your app is in "Testing" mode, your Google account email **must** be added to the "Test users" list under the OAuth Consent Screen settings in Google Cloud Console. |
 | When attempting to authenticate I get an "unknown error" from Google after pasting the code. | This can be caused by browser extensions interfering with Google's authentication scripts or an issue with the copied URL. Try disabling browser extensions or using an incognito/private browsing window. Ensure you copy the *entire* URL after granting permissions and paste it back into the terminal. |
 | The module displays "Wrong Credentials. An error occurred while reading the credentials.json file..." | This means `credentials.json` is either missing, malformed, or doesn't contain the expected `client_id` or `client_secret` under an `installed` key. Ensure you downloaded the correct "Desktop application" credentials and named the file `credentials.json`. This specific message often points to issues within the `installed` object in your `credentials.json`. |
+
+## Several Google accounts
+
+One install can show several Google accounts, one per module instance. Give each instance a `tokenFile`, the absolute path to that account's token JSON, and optionally a `credentialsFile` for the OAuth client file:
+
+```js
+{
+  module: "MMM-GoogleCalendar",
+  header: "Work",
+  position: "top_left",
+  config: {
+    tokenFile: "/home/pi/google/work.json",
+    credentialsFile: "/home/pi/google/credentials.json",
+    calendars: [{ symbol: "calendar-week", calendarID: "primary" }]
+  }
+}
+```
+
+Create each token by running `node authorize.js` once per account and moving the resulting `token.json` to its own path. An instance without `tokenFile` keeps using the single `token.json` in the module folder. While a token file is missing or revoked, that instance shows an authentication message and keeps checking, so it starts working once the file is in place.
